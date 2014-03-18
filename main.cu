@@ -21,8 +21,6 @@ using namespace std;
 
 // Uncomment to use the live Kinect Camera
 //#define KINECT
-#define IMG_WIDTH 640
-#define IMG_HEIGHT 480
 
 __global__ void DiamondDotProduct(float *p, float *d, int w, int h)
 {
@@ -35,15 +33,15 @@ __global__ void DiamondDotProduct(float *p, float *d, int w, int h)
 
         float pp = p[idx];
         float a1 = 0.0f;    float a2 = 0.0f;    float a3 = 0.0f;
-        float b1 = 0.0f;    float b2 = 0.0f;
+        float b1 = 0.0f;    float b2 = 0.0f;    float b3 = 0.0f;
         float c1 = 0.0f;    float c2 = 0.0f;    float c3 = 0.0f;
-        float d1 = 0.0f;    float d2 = 0.0f;
+        float d1 = 0.0f;    float d2 = 0.0f;    float d3 = 0.0f;
                                                 float e3 = 0.0f;
 
         if(x!=0)            { a1 = p[idx-1]; a2 = p[idx+(size_t)h*w-1]; a3 = p[idx+(size_t)2*h*w-1]; }
-        if((x+1)!=w)        { b1 = p[idx+1]; b2 = p[idx+(size_t)h*w+1]; }
+        if((x+1)!=w)        { b1 = p[idx+1]; b2 = p[idx+(size_t)h*w+1]; b3 = p[idx+(size_t)2*h*w+1]; }
         if(y!=0)            { c1 = p[idx-w]; c2 = p[idx+(size_t)h*w-w]; c3 = p[idx+(size_t)2*h*w-w]; }
-        if((y+1)!=h)        { d1 = p[idx+w]; d2 = p[idx+(size_t)h*w+w]; }
+        if((y+1)!=h)        { d1 = p[idx+w]; d2 = p[idx+(size_t)h*w+w]; d3 = p[idx+(size_t)2*h*w+w]; }
         if(y!=0 && x!=0)    {                                           e3  = p[idx+(size_t)2*h*w-w-1]; }
         //if((y+1)!=h && (x+1)!=h)    {                                   e3  = p[idx+(size_t)2*h*w+w+1]; }
 
@@ -142,61 +140,65 @@ int main(int argc, char **argv)
 	getParam("blockZ", blockZ, argc, argv);
 	cout << "blocksize: " << blockX << "x" << blockY << "x" << blockZ << endl;
 
-    float theta = 50.0f;
+    int width = 640;
+    getParam("width", width, argc, argv);
+    cout << "width: " << width << endl;
+
+    int height = 480;
+    getParam("height", height, argc, argv);
+    cout << "height: " << height << endl;
+
+    float theta = 100.0f;
     getParam("theta", theta, argc, argv);
     cout << "theta: " << theta << endl;
 
-    float tau = 0.02f;
+    float tau = 0.005f;
     getParam("tau", tau, argc, argv);
     cout << "tau: " << tau << endl;
 
-    float decay = 0.98f;
+    float decay = 0.975f;
     getParam("decay", decay, argc, argv);
     cout << "decay: " << decay << endl;
 
-    int N1 = 1;
-    getParam("N1", N1, argc, argv);
-    cout << "N1: " << N1 << endl;
-
-    int N2 = 1;
-    getParam("N2", N2, argc, argv);
-    cout << "N2: " << N2 << endl;
+    int N = 2500;
+    getParam("N", N, argc, argv);
+    cout << "N: " << N << endl;
 
 #ifdef KINECT
 // Codes to read from Kinect
 
 #else
     // Load the raw file (Size must be 640x480 == IMG_WIDTH*IMG_HEIGHT)
-	uint16_t *depth = new uint16_t[IMG_WIDTH*IMG_HEIGHT];
+	uint16_t *depth = new uint16_t[width*height];
 	ifstream file_buf(rawfile.c_str(), ios_base::binary);
-	file_buf.read((char*) depth, IMG_WIDTH*IMG_HEIGHT*sizeof(uint64_t));
+	file_buf.read((char*) depth, width*height*sizeof(uint64_t));
     file_buf.close();
 
 	// Find Maximum and convert it to float
-	float *fInDepth = new float[IMG_WIDTH*IMG_HEIGHT];
+	float *fInDepth = new float[width*height];
 	uint16_t maxValue = 0;
-	for (size_t y = 0; y < IMG_HEIGHT; y++)
+	for (int y = 0; y < height; y++)
     {
-        size_t offset = y*IMG_WIDTH;
-		for (size_t x = 0; x < IMG_WIDTH; x++)
+        size_t offset = (size_t)y*width;
+		for (int x = 0; x < width; x++)
 			if (maxValue < depth[x + offset]) maxValue = depth[x + offset];
     }
 
     // Normalize the input data
-	for (size_t y = 0; y < IMG_HEIGHT; y++)
+	for (int y = 0; y < height; y++)
     {
-        size_t offset = y*IMG_WIDTH;
-		for (size_t x = 0; x < IMG_WIDTH; x++)
+        size_t offset = (size_t)y*width;
+		for (int x = 0; x < width; x++)
 			fInDepth[x + offset] = (float)depth[x + offset] / (float)maxValue;
     }
 
     // Setup input image
-	cv::Mat mInDepth(IMG_HEIGHT,IMG_WIDTH,CV_32FC1);
+	cv::Mat mInDepth(height,width,CV_32FC1);
 	convert_layered_to_mat(mInDepth, (const float*) fInDepth);
 
     // Setup output image
-    float *fOutDepth = new float[(size_t)IMG_WIDTH*IMG_HEIGHT];
-	cv::Mat mOutDepth(IMG_HEIGHT,IMG_WIDTH,CV_32FC1);
+    float *fOutDepth = new float[(size_t)width*height];
+	cv::Mat mOutDepth(height,width,CV_32FC1);
     
 #endif
 
@@ -206,50 +208,45 @@ int main(int argc, char **argv)
 
     // Allocate memory on the GPU and copy data
     float *dU, *dV, *dP, *dD, *dDiaD;
-    cudaMalloc(&dU, (size_t)IMG_WIDTH*IMG_HEIGHT*sizeof(float)); CUDA_CHECK;
-    cudaMalloc(&dV, (size_t)IMG_WIDTH*IMG_HEIGHT*sizeof(float)); CUDA_CHECK;
-    cudaMalloc(&dD, (size_t)IMG_WIDTH*IMG_HEIGHT*sizeof(float)); CUDA_CHECK;
-    cudaMalloc(&dP, (size_t)3*IMG_WIDTH*IMG_HEIGHT*sizeof(float)); CUDA_CHECK;
-    cudaMalloc(&dDiaD, (size_t)3*IMG_WIDTH*IMG_HEIGHT*sizeof(float)); CUDA_CHECK;
-    cudaMemcpy(dU, fInDepth, (size_t)IMG_WIDTH*IMG_HEIGHT*sizeof(float), cudaMemcpyHostToDevice); CUDA_CHECK;
-    cudaMemcpy(dV, dU, (size_t)IMG_WIDTH*IMG_HEIGHT*sizeof(float), cudaMemcpyDeviceToDevice); CUDA_CHECK;
-    cudaMemset(dD, 0, (size_t)IMG_WIDTH*IMG_HEIGHT*sizeof(float)); CUDA_CHECK;
-    //cudaMemset(dP, 0, (size_t)3*IMG_WIDTH*IMG_HEIGHT*sizeof(float)); CUDA_CHECK;
-    cudaMemset(dDiaD, 0, (size_t)3*IMG_WIDTH*IMG_HEIGHT*sizeof(float)); CUDA_CHECK;
+    cudaMalloc(&dU, (size_t)width*height*sizeof(float)); CUDA_CHECK;
+    cudaMalloc(&dV, (size_t)width*height*sizeof(float)); CUDA_CHECK;
+    cudaMalloc(&dD, (size_t)width*height*sizeof(float)); CUDA_CHECK;
+    cudaMalloc(&dP, (size_t)3*width*height*sizeof(float)); CUDA_CHECK;
+    cudaMalloc(&dDiaD, (size_t)3*width*height*sizeof(float)); CUDA_CHECK;
+    cudaMemcpy(dU, fInDepth, (size_t)width*height*sizeof(float), cudaMemcpyHostToDevice); CUDA_CHECK;
+    cudaMemcpy(dV, dU, (size_t)width*height*sizeof(float), cudaMemcpyDeviceToDevice); CUDA_CHECK;
+    cudaMemset(dD, 0, (size_t)width*height*sizeof(float)); CUDA_CHECK;
+    cudaMemset(dP, 0, (size_t)3*width*height*sizeof(float)); CUDA_CHECK;
+    cudaMemset(dDiaD, 0, (size_t)3*width*height*sizeof(float)); CUDA_CHECK;
 
     // Init block and grid sizes
     dim3 block = dim3(blockX, blockY, blockZ);
-    dim3 grid = dim3((IMG_WIDTH+block.x-1)/block.x, (IMG_HEIGHT+block.y-1)/block.y, 1);
+    dim3 grid = dim3((width+block.x-1)/block.x, (height+block.y-1)/block.y, 1);
 
-    for(int n1=0; n1<N1; n1++)
+    for(int n=0; n<N; n++)
     {
+        DiamondDotProduct<<<grid, block>>>(dP, dD, width, height);
+        cudaDeviceSynchronize();
+
         theta *= decay;
-        //cudaMemcpy(dV, dU, (size_t)IMG_WIDTH*IMG_HEIGHT*sizeof(float), cudaMemcpyDeviceToDevice); CUDA_CHECK;
-        cudaMemset(dP, 0, (size_t)3*IMG_WIDTH*IMG_HEIGHT*sizeof(float)); CUDA_CHECK;
+        ComputeU<<<grid, block>>>(dV, dD, dU, width, height, theta);
+        cudaDeviceSynchronize();
+        
+        DiamondOperator<<<grid, block>>>(dU, dDiaD, width, height);
+        cudaDeviceSynchronize();
 
-        for(int n2=0; n2<N2; n2++)
-        {
-            DiamondDotProduct<<<grid, block>>>(dP, dD, IMG_WIDTH, IMG_HEIGHT);
-            cudaDeviceSynchronize();
-
-            ComputeU<<<grid, block>>>(dV, dD, dU, IMG_WIDTH, IMG_HEIGHT, theta);
-            cudaDeviceSynchronize();
-            
-            DiamondOperator<<<grid, block>>>(dU, dDiaD, IMG_WIDTH, IMG_HEIGHT);
-            cudaDeviceSynchronize();
-
-            ComputeDualVariable<<<grid, block>>>(dDiaD, dP, IMG_WIDTH, IMG_HEIGHT, theta, tau);
-            cudaDeviceSynchronize();
-        }
+        ComputeDualVariable<<<grid, block>>>(dDiaD, dP, width, height, theta, tau);
+        cudaDeviceSynchronize();
     }
 
-    DiamondDotProduct<<<grid, block>>>(dP, dD, IMG_WIDTH, IMG_HEIGHT);
+    DiamondDotProduct<<<grid, block>>>(dP, dD, width, height);
     cudaDeviceSynchronize();
 
-    ComputeU<<<grid, block>>>(dU, dV, dD, IMG_WIDTH, IMG_HEIGHT, theta);
+    //theta *= decay;
+    ComputeU<<<grid, block>>>(dV, dD, dU, width, height, theta);
     
     // Copy data back to CPU
-    cudaMemcpy(fOutDepth, dU, (size_t)IMG_WIDTH*IMG_HEIGHT*sizeof(float), cudaMemcpyDeviceToHost); CUDA_CHECK;
+    cudaMemcpy(fOutDepth, dU, (size_t)width*height*sizeof(float), cudaMemcpyDeviceToHost); CUDA_CHECK;
     
     // Deallocate memory on the GPU
     cudaFree(dU); CUDA_CHECK;
@@ -261,7 +258,7 @@ int main(int argc, char **argv)
     // Display images
 	showImage("Input Depth Image", mInDepth, 40, 100);
     convert_layered_to_mat(mOutDepth, fOutDepth);
-	showImage("Output Depth Image", mOutDepth, 100+IMG_WIDTH, 100);
+	showImage("Output Depth Image", mOutDepth, 100+width, 100);
 
     // Save images
     cv::imwrite("image_input.png",mInDepth*255.f);  // "imwrite" assumes channel range [0,255]
