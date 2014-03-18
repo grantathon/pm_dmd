@@ -1,19 +1,14 @@
 // ###
 // ###
-// ### Practical Course: GPU Programming in Computer Vision
+// ### Depth Map Denoising of Kinect Depth Images
 // ### 
 // ###
-// ### Technical University Munich, Computer Vision Group
-// ### Winter Semester 2013/2014, March 3 - April 4
+// ### Technical University of Munich
 // ###
-// ###
-// ### Project Phase: Boundary and Edge Detection using Kinect Depth Images
-// ###
-// ### Group 8
 // ### 
-// ### Xiao HUANG, xiao.huang@tum.de, p071
-// ### Xiao, XUE, xuexiao1989@gmail.com, p072
-// ### Sing Chun, LEE, leesingchun@gmail.com, p077
+// ### Grant Bartel, grant.bartel@tum.de
+// ### Faisal Caeiro, faisal.caeiro@tum.de
+// ### Ayman Saleem, ayman.saleem@tum.de
 // ###
 // ###
 
@@ -37,6 +32,7 @@ __global__ void DiamondDotProduct(float *p, float *d, int w, int h)
     if(x<w && y<h)
     {
         size_t idx = x + (size_t)y*w;
+
         float pp = p[idx];
         float a1 = 0.0f;    float a2 = 0.0f;    float a3 = 0.0f;
         float b1 = 0.0f;    float b2 = 0.0f;
@@ -49,16 +45,17 @@ __global__ void DiamondDotProduct(float *p, float *d, int w, int h)
         if(y!=0)            { c1 = p[idx-w]; c2 = p[idx+(size_t)h*w-w]; c3 = p[idx+(size_t)2*h*w-w]; }
         if((y+1)!=h)        { d1 = p[idx+w]; d2 = p[idx+(size_t)h*w+w]; }
         if(y!=0 && x!=0)    {                                           e3  = p[idx+(size_t)2*h*w-w-1]; }
+        //if((y+1)!=h && (x+1)!=h)    {                                   e3  = p[idx+(size_t)2*h*w+w+1]; }
 
         d[idx] = sqrtf(1.0f/3.0f)*( a1 + b1 + c1 + d1 - 4*pp )
                + sqrtf(2.0f/3.0f)*( c2 + d2 - a2 - b2 )
                + sqrtf(8.0f/3.0f)*( pp + e3 - a3 - c3 );
-
+               //+ sqrtf(8.0f/3.0f)*( pp + e3 - b3 - d3 );
     }
 }
 
 
-__global__ void ComputeU(float *u, float *v, float *d, int w, int h, float theta)
+__global__ void ComputeU(float *v, float *d, float *u, int w, int h, float theta)
 {
     int x = threadIdx.x + blockIdx.x*blockDim.x;
     int y = threadIdx.y + blockIdx.y*blockDim.y;
@@ -80,6 +77,7 @@ __global__ void DiamondOperator(float *u, float *dd, int w, int h)
     if(x<w && y<h)
     {
         size_t idx = x + (size_t)y*w;
+
         float a = 0.0f;
         float b = 0.0f;
         float c = 0.0f;
@@ -91,10 +89,12 @@ __global__ void DiamondOperator(float *u, float *dd, int w, int h)
         if(y!=0)                    { c = u[idx-w]; }
         if((y+1)!=h)                { d = u[idx+w]; }
         if((y+1)!=h && (x+1)!=w)    { e = u[idx+w+1]; }
+        //if(y!=0 && x!=0)            { e = u[idx-w-1]; }
 
         dd[idx]               = sqrtf(1.0f/3.0f)*( a + b + c + d - 4*u[idx] );
         dd[idx+(size_t)h*w]   = sqrtf(2.0f/3.0f)*( c + d - a - b );
         dd[idx+(size_t)2*h*w] = sqrtf(8.0f/3.0f)*( u[idx] + e - b - d );
+        //dd[idx+(size_t)2*h*w] = sqrtf(8.0f/3.0f)*( u[idx] + e - a - c );
     }
 }
 
@@ -107,26 +107,16 @@ __global__ void ComputeDualVariable(float *dd, float *p, int w, int h, float the
     if(x<w && y<h)
     {
         size_t idx = x + (size_t)y*w;
-        float c = tau/theta;
-        float d = dd[idx];
-        
-        for(int j=0; j<3; j++)
-        {
-            size_t idxOffset = idx + (size_t)j*h*w;
 
-            float p1 = p[idxOffset] + c*d;
-            float p2 = p[idxOffset+(size_t)h*w] + c*d;
-            float p3 = p[idxOffset+(size_t)2*h*w] + c*d;
-            
-            p[idxOffset]                = p1/fmax(1, sqrtf(powf(p1, 2) + powf(p2, 2) + powf(p3, 2)));
-            p[idxOffset+(size_t)h*w]    = p2/fmax(1, sqrtf(powf(p1, 2) + powf(p2, 2) + powf(p3, 2)));
-            p[idxOffset+(size_t)2*h*w]  = p3/fmax(1, sqrtf(powf(p1, 2) + powf(p2, 2) + powf(p3, 2)));
-            /*
-            p[idxOffset]                = p1/fmax(1, fabs(p1));
-            p[idxOffset+(size_t)h*w]    = p2/fmax(1, fabs(p2));
-            p[idxOffset+(size_t)2*h*w]  = p3/fmax(1, fabs(p3));
-            */
-        }
+        float d = dd[idx];
+        float p1 = p[idx] + (tau/theta)*d;
+        float p2 = p[idx+(size_t)h*w] + (tau/theta)*d;
+        float p3 = p[idx+(size_t)2*h*w] + (tau/theta)*d;
+        float maxDenom = fmax(1, sqrtf(powf(p1, 2) + powf(p2, 2) + powf(p3, 2)));
+        
+        p[idx]                = p1/maxDenom;
+        p[idx+(size_t)h*w]    = p2/maxDenom;
+        p[idx+(size_t)2*h*w]  = p3/maxDenom;
     }
 }
 
@@ -152,7 +142,7 @@ int main(int argc, char **argv)
 	getParam("blockZ", blockZ, argc, argv);
 	cout << "blocksize: " << blockX << "x" << blockY << "x" << blockZ << endl;
 
-    int theta = 50;
+    float theta = 50.0f;
     getParam("theta", theta, argc, argv);
     cout << "theta: " << theta << endl;
 
@@ -160,15 +150,15 @@ int main(int argc, char **argv)
     getParam("tau", tau, argc, argv);
     cout << "tau: " << tau << endl;
 
-    float decay = 0.95f;
+    float decay = 0.98f;
     getParam("decay", decay, argc, argv);
     cout << "decay: " << decay << endl;
 
-    int N1 = 20;
+    int N1 = 1;
     getParam("N1", N1, argc, argv);
     cout << "N1: " << N1 << endl;
 
-    int N2 = 10;
+    int N2 = 1;
     getParam("N2", N2, argc, argv);
     cout << "N2: " << N2 << endl;
 
@@ -224,7 +214,7 @@ int main(int argc, char **argv)
     cudaMemcpy(dU, fInDepth, (size_t)IMG_WIDTH*IMG_HEIGHT*sizeof(float), cudaMemcpyHostToDevice); CUDA_CHECK;
     cudaMemcpy(dV, dU, (size_t)IMG_WIDTH*IMG_HEIGHT*sizeof(float), cudaMemcpyDeviceToDevice); CUDA_CHECK;
     cudaMemset(dD, 0, (size_t)IMG_WIDTH*IMG_HEIGHT*sizeof(float)); CUDA_CHECK;
-    cudaMemset(dP, 0, (size_t)3*IMG_WIDTH*IMG_HEIGHT*sizeof(float)); CUDA_CHECK;
+    //cudaMemset(dP, 0, (size_t)3*IMG_WIDTH*IMG_HEIGHT*sizeof(float)); CUDA_CHECK;
     cudaMemset(dDiaD, 0, (size_t)3*IMG_WIDTH*IMG_HEIGHT*sizeof(float)); CUDA_CHECK;
 
     // Init block and grid sizes
@@ -233,12 +223,16 @@ int main(int argc, char **argv)
 
     for(int n1=0; n1<N1; n1++)
     {
+        theta *= decay;
+        //cudaMemcpy(dV, dU, (size_t)IMG_WIDTH*IMG_HEIGHT*sizeof(float), cudaMemcpyDeviceToDevice); CUDA_CHECK;
+        cudaMemset(dP, 0, (size_t)3*IMG_WIDTH*IMG_HEIGHT*sizeof(float)); CUDA_CHECK;
+
         for(int n2=0; n2<N2; n2++)
         {
             DiamondDotProduct<<<grid, block>>>(dP, dD, IMG_WIDTH, IMG_HEIGHT);
             cudaDeviceSynchronize();
 
-            ComputeU<<<grid, block>>>(dU, dV, dD, IMG_WIDTH, IMG_HEIGHT, theta);
+            ComputeU<<<grid, block>>>(dV, dD, dU, IMG_WIDTH, IMG_HEIGHT, theta);
             cudaDeviceSynchronize();
             
             DiamondOperator<<<grid, block>>>(dU, dDiaD, IMG_WIDTH, IMG_HEIGHT);
@@ -247,8 +241,6 @@ int main(int argc, char **argv)
             ComputeDualVariable<<<grid, block>>>(dDiaD, dP, IMG_WIDTH, IMG_HEIGHT, theta, tau);
             cudaDeviceSynchronize();
         }
-
-        theta *= decay;
     }
 
     DiamondDotProduct<<<grid, block>>>(dP, dD, IMG_WIDTH, IMG_HEIGHT);
