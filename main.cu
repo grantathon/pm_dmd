@@ -14,6 +14,7 @@
 
 // Uncomment to use the live Kinect Camera
 //#define KINECT
+
 #include "aux.h"	// Helping functions for CUDA GPU Programming
 #include <iostream>	// For standard IO on console
 #include "constant.cuh"
@@ -28,6 +29,8 @@ using namespace std;
 
 uint16_t *depth = new uint16_t[KINECT_SIZE_X*KINECT_SIZE_Y];
 float *fInDepth = new float[KINECT_SIZE_X*KINECT_SIZE_Y];
+
+texture<float, 2, cudaReadModeElementType> vTexRef;
 
 void normalizeDepth(uint16_t *input, float *output, bool inverse = false)
 {
@@ -55,63 +58,90 @@ void normalizeDepth(uint16_t *input, float *output, bool inverse = false)
 __host__ __device__ float DiamondDotProduct(float *p, int w, int h, int x, int y)
 {
     size_t offset = (size_t)h*w;
-    float pp = p[0];
     float a1 = 0.0f;    float a2 = 0.0f;    float a3 = 0.0f;
     float b1 = 0.0f;    float b2 = 0.0f;
     float c1 = 0.0f;    float c2 = 0.0f;    float c3 = 0.0f;
     float d1 = 0.0f;    float d2 = 0.0f;
                                             float e3 = 0.0f;
 
+    // Clamp the boundary values
     if(x!=0)            { a1 = p[-1]; a2 = p[offset-1];     a3 = p[2*offset-1]; }
     if((x+1)!=w)        { b1 = p[1];  b2 = p[offset+1]; }
     if(y!=0)            { c1 = p[-w]; c2 = p[offset-w];     c3 = p[2*offset-w]; }
     if((y+1)!=h)        { d1 = p[w];  d2 = p[offset+w]; }
     if(y!=0 && x!=0)    {                                   e3  = p[2*offset-w-1]; }
 
-    return  sqrtf(1.0f/3.0f)*( a1 + b1 + c1 + d1 - 4*pp )
+    return  sqrtf(1.0f/3.0f)*( a1 + b1 + c1 + d1 - 4*p[0] )
           + sqrtf(2.0f/3.0f)*( c2 + d2 - a2 - b2 )
-          + sqrtf(8.0f/3.0f)*( pp + e3 - a3 - c3 );
+          + sqrtf(8.0f/3.0f)*( p[0] + e3 - a3 - c3 );
 }
 
-__host__ __device__ void DiamondOperator(float *u, float* dd, int w, int h, int x, int y)
-{
-    size_t offset = (size_t)h*w;
-    float uu = u[0];
-    float a = 0.0f;
-    float b = 0.0f;
-    float c = 0.0f;
-    float d = 0.0f;
-    float e = 0.0f;
-
-    if(x!=0)                    { a = u[-1]; }
-    if((x+1)!=w)                { b = u[1]; }
-    if(y!=0)                    { c = u[-w]; }
-    if((y+1)!=h)                { d = u[w]; }
-    if((y+1)!=h && (x+1)!=w)    { e = u[w+1]; }
-
-    dd[0]           = sqrtf(1.0f/3.0f)*( a + b + c + d - 4*uu );
-    dd[offset]      = sqrtf(2.0f/3.0f)*( c + d - a - b );
-    dd[2*offset]    = sqrtf(8.0f/3.0f)*( uu + e - b - d );
-}
-
-__global__ void ComputeImageUpdate(float *v, float *d, float *p, float *u, int w, int h, float tau, float theta)
+__global__ void UpdateImageAndDualVariable(float *u, float *p, int w, int h, float tau, float theta)
 {
     int x = threadIdx.x + blockIdx.x*blockDim.x;
     int y = threadIdx.y + blockIdx.y*blockDim.y;
 
     if(x<w && y<h)
     {
+        // Initialize indexing variables
+        int xSM = threadIdx.x;
+        int ySM = threadIdx.y;
+        size_t idxSM = xSM + (size_t)ySM*blockDim.x;
+        
         size_t idx = x + (size_t)y*w;
         size_t offset = (size_t)h*w;
 
-        u[idx] = v[idx] - theta*DiamondDotProduct(&p[idx], w, h, x, y);
+        // Update shared memory U and copy to global memory
+        extern __shared__ float uSM[];
+        uSM[idxSM] = tex2D(vTexRef, x+0.5, y+0.5) - theta*DiamondDotProduct(&p[idx], w, h, x, y);
+        __syncthreads();
+        u[idx] = uSM[idxSM];
         
-        DiamondOperator(&u[idx], &d[idx], w, h, x, y);
-        float p1 = p[idx]           + (tau/theta)*d[idx];
-        float p2 = p[idx+offset]    + (tau/theta)*d[idx+offset];
-        float p3 = p[idx+2*offset]  + (tau/theta)*d[idx+2*offset];
+        float a = 0.0f;
+        float b = 0.0f;
+        float c = 0.0f;
+        float d = 0.0f;
+        float e = 0.0f;
+    
+        // Clamp the values used in the diamond operator
+        if(x!=0)
+        {
+            if(xSM!=0)  { a = uSM[idxSM-1]; }   // Access shared memory
+            else        { a = u[idx-1]; }       // Access global memory
+        }
+        
+        if((x+1)!=w)
+        {
+            if((xSM+1)!=blockDim.x) { b = uSM[idxSM+1]; }   // Access shared memory
+            else                    { b = u[idx+1]; }       // Access global memory
+        }
+
+        if(y!=0)
+        {
+            if(ySM!=0)  { c = uSM[idxSM-blockDim.x]; }  // Access shared memory
+            else        { c = u[idx-w]; }               // Access global memory
+        }
+
+        if((y+1)!=h)
+        {
+            if((ySM+1)!=blockDim.y) { d = uSM[idxSM+blockDim.x]; }  // Access shared memory
+            else                    { d = u[idx+w]; }               // Access global memory
+        }
+
+        if((y+1)!=h && (x+1)!=w)
+        {
+            if((ySM+1)!=blockDim.y && (xSM+1)!=blockDim.x)  { e = uSM[idxSM+blockDim.x+1]; }    // Access shared memory
+            else                                            { e = u[idx+w+1]; }                 // Access global memory
+        }
+
+        // Compute diamond operator on U and denominator for P normalization
+        float uu = uSM[idxSM];
+        float p1 = p[idx]           + (tau/theta)*sqrtf(1.0f/3.0f)*( a + b + c + d - 4*uu );
+        float p2 = p[idx+offset]    + (tau/theta)*sqrtf(2.0f/3.0f)*( c + d - a - b );
+        float p3 = p[idx+2*offset]  + (tau/theta)*sqrtf(8.0f/3.0f)*( uu + e - b - d );
         float maxDenom = fmax(1, sqrtf(powf(p1, 2) + powf(p2, 2) + powf(p3, 2)));
-        
+
+        // Update the normalized components of P
         p[idx]          = p1/maxDenom;
         p[idx+offset]   = p2/maxDenom;
         p[idx+2*offset] = p3/maxDenom;
@@ -133,7 +163,7 @@ int main(int argc, char **argv)
 #endif
 
 	// Default setting for block sizes
-	size_t blockX = 32, blockY = 8, blockZ = 1;
+	size_t blockX = 64, blockY = 4, blockZ = 1;
 	getParam("blockX", blockX, argc, argv);
 	getParam("blockY", blockY, argc, argv);
 	getParam("blockZ", blockZ, argc, argv);
@@ -191,40 +221,47 @@ int main(int argc, char **argv)
     timer.start();
 
     // Allocate memory on the GPU and copy data
-    float *dU, *dV, *dP, *dD;
+    float *dU, *dV, *dP;
     cudaMalloc(&dU, (size_t)KINECT_SIZE_Y*KINECT_SIZE_X*sizeof(float)); CUDA_CHECK;
     cudaMalloc(&dV, (size_t)KINECT_SIZE_Y*KINECT_SIZE_X*sizeof(float)); CUDA_CHECK;
     cudaMalloc(&dP, (size_t)3*KINECT_SIZE_Y*KINECT_SIZE_X*sizeof(float)); CUDA_CHECK;
-    cudaMalloc(&dD, (size_t)3*KINECT_SIZE_Y*KINECT_SIZE_X*sizeof(float)); CUDA_CHECK;
     cudaMemcpy(dU, fInDepth, (size_t)KINECT_SIZE_Y*KINECT_SIZE_X*sizeof(float), cudaMemcpyHostToDevice); CUDA_CHECK;
     cudaMemcpy(dV, dU, (size_t)KINECT_SIZE_Y*KINECT_SIZE_X*sizeof(float), cudaMemcpyDeviceToDevice); CUDA_CHECK;
     cudaMemset(dP, 0, (size_t)3*KINECT_SIZE_Y*KINECT_SIZE_X*sizeof(float)); CUDA_CHECK;
-    cudaMemset(dD, 0, (size_t)3*KINECT_SIZE_Y*KINECT_SIZE_X*sizeof(float)); CUDA_CHECK;
 
-    // Init block and grid sizes
+    // Setup texture reference for V
+    vTexRef.addressMode[0] = cudaAddressModeClamp;
+    vTexRef.addressMode[1] = cudaAddressModeClamp;
+    vTexRef.filterMode = cudaFilterModeLinear;
+    vTexRef.normalized = false;
+    cudaChannelFormatDesc desc = cudaCreateChannelDesc<float>();
+    cudaBindTexture2D(NULL, &vTexRef, dV, &desc, KINECT_SIZE_X, KINECT_SIZE_Y, KINECT_SIZE_X*sizeof(float));
+
+    // Init block, grid, and shared memory size
     dim3 block = dim3(blockX, blockY, blockZ);
     dim3 grid = dim3((KINECT_SIZE_X+block.x-1)/block.x, (KINECT_SIZE_Y+block.y-1)/block.y, 1);
+    size_t smBytes = (size_t)block.x*block.y*block.z*sizeof(float);
 
     // Iterate through main computation
     for(int n=0; n<N; n++)
     {
         theta *= decay;
-        ComputeImageUpdate<<<grid, block>>>(dV, dD, dP, dU, KINECT_SIZE_X, KINECT_SIZE_Y, tau, theta);
+        UpdateImageAndDualVariable<<<grid, block, smBytes>>>(dU, dP, KINECT_SIZE_X, KINECT_SIZE_Y, tau, theta); CUDA_CHECK;
         cudaDeviceSynchronize();
     }
 
     // Compute final output image
     theta *= decay;
-    ComputeImageUpdate<<<grid, block>>>(dV, dD, dP, dU, KINECT_SIZE_X, KINECT_SIZE_Y, tau, theta);
+    UpdateImageAndDualVariable<<<grid, block, smBytes>>>(dU, dP, KINECT_SIZE_X, KINECT_SIZE_Y, tau, theta); CUDA_CHECK;
     
     // Copy data back to CPU
     cudaMemcpy(fOutDepth, dU, (size_t)KINECT_SIZE_X*KINECT_SIZE_Y*sizeof(float), cudaMemcpyDeviceToHost); CUDA_CHECK;
     
-    // Deallocate memory on the GPU
+    // Deallocate and unbind memory on the GPU
     cudaFree(dU); CUDA_CHECK;
     cudaFree(dV); CUDA_CHECK;
     cudaFree(dP); CUDA_CHECK;
-    cudaFree(dD); CUDA_CHECK;
+    cudaUnbindTexture(vTexRef);
 
     // Display output image and save
     convert_layered_to_mat(mOutDepth, fOutDepth);
