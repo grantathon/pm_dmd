@@ -6,9 +6,13 @@
 // ### Technical University of Munich
 // ###
 // ### 
-// ### Grant Bartel, grant.bartel@tum.de
-// ### Faisal Caeiro, faisal.caeiro@tum.de
-// ### Ayman Saleem, ayman.saleem@tum.de
+// ### Group 6
+// ### 
+// ### Project Phase: Denoising Kinect Depth Images
+// ###
+// ### Grant Bartel, grant.bartel@tum.de, p051
+// ### Faisal Caeiro, faisal.caeiro@tum.de, p079
+// ### Ayman Saleem, ayman.saleem@tum.de, p050
 // ###
 // ###
 
@@ -60,84 +64,72 @@ uint16_t normalizeDepth(uint16_t *input, float *output, bool inverse = false)
     return maxValue;
 }
 
-void denormalizeDepth(float *input, uint16_t *output, uint16_t max_val)
+__global__ void InpaintingMask(bool *m, int w, int h, float thresh)
 {
-	// Denormalize it from [0,1]
-	for (size_t y = 0; y < KINECT_SIZE_Y; y++)
-		for (size_t x = 0; x < KINECT_SIZE_X; x++)
-		{
-			size_t idx = x + y * KINECT_SIZE_X;
-			output[idx] = (uint16_t)(input[idx]*max_val);
-		}
-}
-
-__global__ void InpaintingMask(float *u, bool *m, int w, int h, float gray_val)
-{
-	size_t x = threadIdx.x + blockDim.x * blockIdx.x;
-	size_t y = threadIdx.y + blockDim.y * blockIdx.y;
+	int x = threadIdx.x + blockDim.x * blockIdx.x;
+	int y = threadIdx.y + blockDim.y * blockIdx.y;
 
 	if (x < w && y < h) { 
 		size_t idx = x + (size_t)y*w;
-        float epsilon = 0.0f; //1e-6;
-        
-        // Check for valid boundary values
-        bool result = (u[idx] < gray_val-epsilon);//>= gray_val-epsilon);
-        if(x!=0 && result==true)                { result = (u[idx-1]    < gray_val-epsilon); }//>= gray_val-epsilon); }
-        if((x+1)<w && result==true)             { result = (u[idx+1]    < gray_val-epsilon); }//>= gray_val-epsilon); }
-        if(y!=0 && result==true)                { result = (u[idx-w]    < gray_val-epsilon); }//>= gray_val-epsilon); }
-        if((y+1)<h && result==true)             { result = (u[idx+w]    < gray_val-epsilon); }//>= gray_val-epsilon); }
-        if(y!=0 && x!=0 && result==true)        { result = (u[idx-w-1]  < gray_val-epsilon); }//>= gray_val-epsilon); }
-        if((y+1)<h && (x+1)<w && result==true)  { result = (u[idx+w+1]  < gray_val-epsilon); }//>= gray_val-epsilon); }
-        
-        //if(result==false) { m[idx] = false; }  // Since m is initialized to true...
-        m[idx] = result;
+		
+        // Find th valid pixels for the GPU algorithm
+	    bool mask = true;
+	    for (int dy=-1; dy<=1; ++dy) {
+		    for (int dx=-1; dx<=1; ++dx) {
+			    if (x+dx>=0 && y+dy>=0 && x+dx < w && y+dy < h) {
+				    if (tex2D(vTexRef, x+0.5+dx, y+0.5+dy) >= thresh) {
+					    mask = false;
+				    }
+			    }
+		    }
+	    }
+	    
+        if(mask==false) { m[idx] = false; }  // Since m is initialized to true...
 	}
 }
 
 __host__ __device__ float DiamondDotProduct(float *p, int w, int h, int x, int y)
 {
+    // Init indexing variables
     size_t idx = x + (size_t)y*w;
     size_t offset = (size_t)w*h;
     
     float p_iMinus1_1, p_iMinus1_2, p_iMinus1_3, p_iPlus1_1, p_iPlus1_2, p_jMinus1_1, p_jMinus1_2, p_jMinus1_3, p_jPlus1_1, p_jPlus1_2, p_ijMinus1_3;
     float dyPlus_1, dyMinus_1, dxPlus_1, dxMinus_1, dyPlus_2, dyMinus_2, dxPlus_2, dxMinus_2, d2dxdy;
 
-    p_iMinus1_1 = p[idx-w];	//(i - 1,j,1);   
-    p_iMinus1_2 = p[idx-w + offset];
-    p_iMinus1_3 = p[idx-w + (size_t)2*offset];
-
-    dyMinus_1 = p_iMinus1_1 - p[idx];
+    // Set the values necessary for the diamond operator components
+    p_iMinus1_1 = p[idx-w];	                    // (i - 1,j,1);   
+    p_iMinus1_2 = p[idx-w + offset];            // (i - 1,j,2);
+    p_iMinus1_3 = p[idx-w + (size_t)2*offset];  // (i - 1,j,3);   
+    dyMinus_1 = p_iMinus1_1 - p[idx];       
     dyMinus_2 = p_iMinus1_2 - p[idx+offset];
 
-    p_iPlus1_1 = p[idx+w];	//(i + 1,j,1);    
-    p_iPlus1_2 = p[idx+w + offset];
-
+    p_iPlus1_1 = p[idx+w];	                    // (i + 1,j,1);    
+    p_iPlus1_2 = p[idx+w + offset];	            // (i + 1,j,2); 
     dyPlus_1 = p_iPlus1_1 - p[idx];
     dyPlus_2 = p_iPlus1_2 - p[idx+offset];
 
-    p_jMinus1_1 = p[idx-1];	//(i,j - 1,1);   
-    p_jMinus1_2 = p[idx-1 + offset];	//(i,j - 1,2); 
-    p_jMinus1_3 = p[idx-1 + (size_t)2*offset];	//(i,j - 1,3); 
-
+    p_jMinus1_1 = p[idx-1];	                    // (i,j - 1,1);   
+    p_jMinus1_2 = p[idx-1 + offset];	        // (i,j - 1,2); 
+    p_jMinus1_3 = p[idx-1 + (size_t)2*offset];	// (i,j - 1,3); 
     dxMinus_1 = p_jMinus1_1 -  p[idx];
     dxMinus_2 = p_jMinus1_2 -  p[idx+offset];
 
-    p_jPlus1_1 = p[idx+1];	//(i,j + 1,1);    
-    p_jPlus1_2 = p[idx+1 + offset];	//(i,j + 1,2);
-
+    p_jPlus1_1 = p[idx+1];	                    // (i,j + 1,1);    
+    p_jPlus1_2 = p[idx+1 + offset];	            // (i,j + 1,2);
     dxPlus_1 =  p_jPlus1_1 - p[idx];
     dxPlus_2 =  p_jPlus1_2 - p[idx+offset];
 
-    p_ijMinus1_3 = p[idx-w - 1 + (size_t)2*offset];	//(i - 1,j - 1,3);
+    p_ijMinus1_3 = p[idx-w - 1 + (size_t)2*offset];	// (i - 1,j - 1,3);
     d2dxdy = p[idx+(size_t)2*offset] + p_ijMinus1_3 - p_jMinus1_3 - p_iMinus1_3;
 
-
+    // Compute the diamond operator components
     float p1 = sqrtf(1.0f/3.0f) * ((dxPlus_1 + dxMinus_1) + (dyPlus_1 + dyMinus_1));
     float p2 = sqrtf(2.0f/3.0f) * ((dxPlus_2 + dxMinus_2) - (dyPlus_2 + dyMinus_2));
     float p3 = sqrtf(8.0f/3.0f) * (d2dxdy);
 
-    float diamondDotPrdtPOut_d = p1 + p2 + p3;
-    return	diamondDotPrdtPOut_d;
+    // Sum the diamond operator components
+    return	p1 + p2 + p3;
 }
 
 __global__ void UpdateImageAndDualVariable(float *u, float *p, bool *m, int w, int h, float tau, float theta)
@@ -147,10 +139,9 @@ __global__ void UpdateImageAndDualVariable(float *u, float *p, bool *m, int w, i
 
     if(x<w && y<h)
     {
+        // Initialize indexing variables
         size_t idx = x + (size_t)y*w;
         size_t offset = (size_t)h*w;
-
-        // Initialize indexing variables
         int xSM = threadIdx.x;
         int ySM = threadIdx.y;
         size_t idxSM = xSM + (size_t)ySM*blockDim.x;
@@ -160,12 +151,9 @@ __global__ void UpdateImageAndDualVariable(float *u, float *p, bool *m, int w, i
         uSM[idxSM] = tex2D(vTexRef, x+0.5, y+0.5);
         __syncthreads();
 
-        // Shouldn't x>0 and y>0???
-        if(m[idx] && x<w-1 && y<h-1 && x>1 && y>1)
-        //if(m[idx] && x<w && y<h && x>0 && y>0)
+        if(m[idx] && (x+1)<w && (y+1)<h && x>0 && y>0)
         {
             // Update U using the diamond dot product of P
-            //uSM[idxSM] -= theta*DiamondDotProduct(&p[idx], w, h, x, y);
             uSM[idxSM] -= theta*DiamondDotProduct(p, w, h, x, y);
             u[idx] = uSM[idxSM];
             __syncthreads();
@@ -201,12 +189,6 @@ __global__ void UpdateImageAndDualVariable(float *u, float *p, bool *m, int w, i
     }
 }
 
-std::string buildFilename(std::string filename, std::string extension) {
-    std::stringstream s;
-    s << filename << extension;
-    return s.str();
-}
-
 int main(int argc, char **argv)
 {
 	// Before the GPU can process the kernels, call Device Synchronize for devise initialization
@@ -229,22 +211,22 @@ int main(int argc, char **argv)
 	cout << "blocksize: " << blockX << "x" << blockY << "x" << blockZ << endl;
 
 	// Default setting for optimization parameter theta
-    float theta = 10.0f;
+    float theta = 0.01f;
     getParam("theta", theta, argc, argv);
     cout << "theta: " << theta << endl;
 
 	// Default setting for time step
-    float tau = 0.005f;
+    float tau = 0.01f;
     getParam("tau", tau, argc, argv);
     cout << "tau: " << tau << endl;
 
 	// Default setting for theta decay
-    float decay = 0.975f;
+    float decay = 1.0f;
     getParam("decay", decay, argc, argv);
     cout << "decay: " << decay << endl;
 
 	// Default setting for total GPU iterations
-    int N = 1000;
+    int N = 200;
     getParam("N", N, argc, argv);
     cout << "N: " << N << endl;
 
@@ -278,10 +260,12 @@ int main(int argc, char **argv)
     // Allocate memory on the GPU and copy data
     float *dU, *dV, *dP;
     bool *dM;
+    
     cudaMalloc(&dM, (size_t)KINECT_SIZE_Y*KINECT_SIZE_X*sizeof(bool)); CUDA_CHECK;
     cudaMalloc(&dU, (size_t)KINECT_SIZE_Y*KINECT_SIZE_X*sizeof(float)); CUDA_CHECK;
     cudaMalloc(&dV, (size_t)KINECT_SIZE_Y*KINECT_SIZE_X*sizeof(float)); CUDA_CHECK;
     cudaMalloc(&dP, (size_t)3*KINECT_SIZE_Y*KINECT_SIZE_X*sizeof(float)); CUDA_CHECK;
+    
     cudaMemcpy(dU, fInDepth, (size_t)KINECT_SIZE_Y*KINECT_SIZE_X*sizeof(float), cudaMemcpyHostToDevice); CUDA_CHECK;
     cudaMemcpy(dV, dU, (size_t)KINECT_SIZE_Y*KINECT_SIZE_X*sizeof(float), cudaMemcpyDeviceToDevice); CUDA_CHECK;
     cudaMemset(dP, 0, (size_t)3*KINECT_SIZE_Y*KINECT_SIZE_X*sizeof(float)); CUDA_CHECK;
@@ -305,7 +289,7 @@ int main(int argc, char **argv)
     size_t smBytes = (size_t)block.x*block.y*block.z*sizeof(float);
 
     // Check which pixels should be ignored in the main computation
-    InpaintingMask<<<grid, block>>>(dU, dM, KINECT_SIZE_X, KINECT_SIZE_Y, 1.0f);
+    InpaintingMask<<<grid, block>>>(dM, KINECT_SIZE_X, KINECT_SIZE_Y, 1.0f);
 
     // Iterate through main computation
     for(int n=0; n<N; n++)
@@ -327,9 +311,6 @@ int main(int argc, char **argv)
     timer.end();
     float t = timer.get();  // Time in seconds
     cout << "GPU time: " << t*1000 << " ms" << endl;
-
-    // Denormalize image for edge-detection group
-    denormalizeDepth(fOutDepth, depth, maxValue);
 
 #ifdef KINECT
 	}
