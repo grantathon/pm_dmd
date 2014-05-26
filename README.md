@@ -3,9 +3,9 @@ pm_dmd
 
 TU Munich project on Depth Map Denoising for Projection Mapping using GPUs.
 
-Grant Bartel, grant.bartel@tum.de
-Faisal Caeiro, faisal.caeiro@tum.de
-Ayman Saleem, ayman.saleem@tum.de
+- Grant Bartel, grant.bartel@tum.de
+- Faisal Caeiro, faisal.caeiro@tum.de
+- Ayman Saleem, ayman.saleem@tum.de
 
 This project implements methods described in "An Unbiased Second-Order Prior for High-Accuracy Motion Estimation" written by Trobin, Pock, Cremers, and Bischof.
 
